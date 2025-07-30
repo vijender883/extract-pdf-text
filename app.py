@@ -56,6 +56,21 @@ class DetailedQuestionRequest(BaseModel):
     years_of_experience: int
     area_of_interest: str
 
+class QuestionAnswer(BaseModel):
+    question: str
+    userAnswer: str
+    correctAnswer: str
+
+class EvaluationRequest(BaseModel):
+    experience: int
+    interests: List[str]
+    questionArray: List[QuestionAnswer]
+    textExtracted: str
+
+class EvaluationSummaryResponse(BaseModel):
+    success: bool
+    summary: str
+
 def validate_file(file: UploadFile) -> None:
     """Validate uploaded file."""
     if not file.filename:
@@ -284,6 +299,49 @@ def generate_detailed_questions_with_gemini(resume_text: str, years_of_experienc
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating detailed questions with Gemini: {str(e)}")
 
+def generate_evaluation_summary(
+    experience: int, 
+    interests: List[str], 
+    question_answers: List[Dict[str, str]], 
+    resume_text: str
+) -> str:
+    """Generate a simple text summary of candidate evaluation and job recommendations."""
+    
+    # Calculate basic metrics
+    total_questions = len(question_answers)
+    correct_answers = sum(1 for qa in question_answers if qa['userAnswer'].lower().strip() == qa['correctAnswer'].lower().strip())
+    score_percentage = int((correct_answers / total_questions) * 100) if total_questions > 0 else 0
+    
+    interests_str = ", ".join(interests)
+    
+    prompt = f"""
+    Based on this candidate's performance, write a comprehensive evaluation summary as plain text.
+
+    CANDIDATE INFO:
+    - Current Experience: {experience} years
+    - Areas of Interest: {interests_str}
+    - Assessment Score: {score_percentage}% ({correct_answers}/{total_questions} correct)
+    - Resume Summary: {resume_text[:500]}...
+
+    Write a detailed evaluation summary that includes:
+    1. Performance assessment based on the {score_percentage}% score
+    2. Recommended job titles they should apply for
+    3. Suggested experience level for job applications (Junior/Mid-level/Senior)
+    4. Specific advice on what types of roles to target
+    5. Any areas they should focus on improving
+
+    Write this as a flowing text summary, not bullet points or structured format. Make it personalized and actionable.
+
+    Keep the tone professional but encouraging. The summary should be 3-4 paragraphs long.
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating evaluation summary: {str(e)}")
+
 @app.post("/extracttext", response_model=TextExtractionResponse)
 async def extract_text(file: UploadFile = File(...)):
     """Extract text from PDF file."""
@@ -371,6 +429,43 @@ async def detailed_question_generation(
         }
     )
 
+@app.post("/evaluateCandidate", response_model=EvaluationSummaryResponse)
+async def evaluate_candidate(request: EvaluationRequest):
+    """Evaluate candidate and provide a text summary with job recommendations."""
+    
+    # Basic validation
+    if request.experience < 0:
+        raise HTTPException(status_code=400, detail="Experience must be a positive number")
+    
+    if not request.interests:
+        raise HTTPException(status_code=400, detail="At least one area of interest is required")
+    
+    if not request.questionArray:
+        raise HTTPException(status_code=400, detail="Question array cannot be empty")
+    
+    # Convert to simple format
+    question_answers = [
+        {
+            "question": qa.question,
+            "userAnswer": qa.userAnswer,
+            "correctAnswer": qa.correctAnswer
+        }
+        for qa in request.questionArray
+    ]
+    
+    # Generate evaluation summary
+    summary = generate_evaluation_summary(
+        experience=request.experience,
+        interests=request.interests,
+        question_answers=question_answers,
+        resume_text=request.textExtracted
+    )
+    
+    return EvaluationSummaryResponse(
+        success=True,
+        summary=summary
+    )
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
@@ -390,7 +485,8 @@ async def root():
             "/generatequestions": "POST - Extract text and generate technical questions",
             "/detailedQuestionGeneration": "POST - Extract text and generate detailed questions based on experience and area of interest",
             "/health": "GET - Health check",
-            "/docs": "GET - API documentation"
+            "/docs": "GET - API documentation",
+            "/evaluateCandidate": "POST - Evaluate candidate and provide job recommendations summary",
         }
     }
 
