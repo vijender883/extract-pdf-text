@@ -52,6 +52,10 @@ class HealthResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error: str
 
+class DetailedQuestionRequest(BaseModel):
+    years_of_experience: int
+    area_of_interest: str
+
 def validate_file(file: UploadFile) -> None:
     """Validate uploaded file."""
     if not file.filename:
@@ -175,6 +179,111 @@ def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating questions with Gemini: {str(e)}")
 
+def generate_detailed_questions_with_gemini(resume_text: str, years_of_experience: int, area_of_interest: str) -> List[Dict[str, Any]]:
+    """Generate detailed multiple-choice questions using Gemini 2.0 Flash based on experience and area of interest."""
+    
+    # Define experience level based on years
+    if years_of_experience <= 2:
+        experience_level = "Junior"
+        complexity = "fundamental concepts and basic implementation"
+    elif years_of_experience <= 5:
+        experience_level = "Mid-level"
+        complexity = "intermediate concepts, best practices, and problem-solving"
+    elif years_of_experience <= 10:
+        experience_level = "Senior"
+        complexity = "advanced concepts, architecture decisions, and optimization"
+    else:
+        experience_level = "Expert/Lead"
+        complexity = "expert-level concepts, system design, and leadership aspects"
+    
+    prompt = f"""
+    Based on the following resume and the specified professional profile, generate exactly 25 multiple-choice questions tailored for a {experience_level} professional with {years_of_experience} years of experience in {area_of_interest}.
+
+    PROFESSIONAL PROFILE:
+    - Years of Experience: {years_of_experience}
+    - Experience Level: {experience_level}
+    - Area of Interest: {area_of_interest}
+
+    RESUME CONTENT:
+    {resume_text}
+
+    INSTRUCTIONS:
+    - Focus on {area_of_interest}-related technologies, concepts, and practices mentioned in the resume
+    - Tailor question difficulty to {experience_level} level focusing on {complexity}
+    - Include industry-specific scenarios and challenges relevant to {area_of_interest}
+    - Consider the candidate's {years_of_experience} years of experience when crafting questions
+    - Each question should have exactly 4 options
+    - The correct_option should be specified as "A", "B", "C", or "D"
+    - Make questions practical and relevant to real-world {area_of_interest} scenarios
+    - Include questions about scalability, performance, security, and best practices relevant to {area_of_interest}
+
+    QUESTION FOCUS AREAS for {area_of_interest}:
+    - Technical skills and frameworks mentioned in the resume relevant to {area_of_interest}
+    - Industry best practices and methodologies
+    - Problem-solving scenarios typical for {experience_level} professionals
+    - Architecture and design patterns appropriate for the experience level
+    - Performance optimization and scalability considerations
+    - Security practices and compliance relevant to {area_of_interest}
+    - Team collaboration and project management (for senior+ levels)
+
+    REQUIRED OUTPUT FORMAT (respond with ONLY valid JSON, no additional text):
+    [
+        {{
+            "question": "In a {area_of_interest} project with {years_of_experience} years of experience, which approach would be most suitable for...",
+            "options": ["Option A", "Option B", "Option C", "Option D"],
+            "correct_option": "A"
+        }}
+    ]
+
+    IMPORTANT: The correct_option must be "A", "B", "C", or "D" where:
+    - "A" corresponds to options[0]
+    - "B" corresponds to options[1]
+    - "C" corresponds to options[2]
+    - "D" corresponds to options[3]
+
+    Generate exactly 25 technical questions based on the resume content, experience level, and area of interest.
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        response_text = response.text.strip()
+        
+        # Try to extract JSON from the response
+        if response_text.startswith('```json'):
+            response_text = response_text[7:]
+        if response_text.endswith('```'):
+            response_text = response_text[:-3]
+        
+        response_text = response_text.strip()
+        
+        # Parse the JSON response
+        questions = json.loads(response_text)
+        
+        # Validate the structure
+        if not isinstance(questions, list) or len(questions) != 25:
+            raise ValueError("Response must be a list of exactly 25 questions")
+        
+        valid_options = {'A', 'B', 'C', 'D'}
+        
+        for i, q in enumerate(questions):
+            if not all(key in q for key in ['question', 'options', 'correct_option']):
+                raise ValueError(f"Question {i+1} is missing required fields")
+            if len(q['options']) != 4:
+                raise ValueError(f"Question {i+1} must have exactly 4 options")
+            if q['correct_option'] not in valid_options:
+                raise ValueError(f"Question {i+1} correct_option must be A, B, C, or D")
+            
+            option_index = ord(q['correct_option']) - ord('A')
+            if option_index < 0 or option_index >= len(q['options']):
+                raise ValueError(f"Question {i+1} correct_option index is out of range")
+        
+        return questions
+        
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response as JSON: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating detailed questions with Gemini: {str(e)}")
+
 @app.post("/extracttext", response_model=TextExtractionResponse)
 async def extract_text(file: UploadFile = File(...)):
     """Extract text from PDF file."""
@@ -219,6 +328,49 @@ async def generate_questions(file: UploadFile = File(...)):
         }
     )
 
+@app.post("/detailedQuestionGeneration", response_model=QuestionGenerationResponse)
+async def detailed_question_generation(
+    file: UploadFile = File(...),
+    years_of_experience: str = Form(...),
+    area_of_interest: str = Form(...)
+):
+    """Extract text from PDF and generate detailed technical multiple-choice questions based on experience and area of interest."""
+    
+    # Validate file
+    validate_file(file)
+    
+    # Convert and validate years_of_experience
+    try:
+        years_exp = int(years_of_experience)
+        if years_exp < 0:
+            raise ValueError("Years of experience must be positive")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Years of experience must be a valid positive number")
+    
+    # Validate area_of_interest
+    if not area_of_interest.strip():
+        raise HTTPException(status_code=400, detail="Area of interest cannot be empty")
+    
+    # Extract text from PDF
+    resume_text = await extract_text_from_pdf(file)
+    
+    # Generate detailed questions using Gemini
+    questions_data = generate_detailed_questions_with_gemini(resume_text, years_exp, area_of_interest.strip())
+    
+    # Convert to Pydantic models
+    questions = [Question(**q) for q in questions_data]
+    
+    return QuestionGenerationResponse(
+        success=True,
+        extracted_text=resume_text,
+        questions=questions,
+        total_questions=len(questions),
+        text_stats={
+            "character_count": len(resume_text),
+            "word_count": len(resume_text.split())
+        }
+    )
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
@@ -236,6 +388,7 @@ async def root():
         "endpoints": {
             "/extracttext": "POST - Extract text from PDF",
             "/generatequestions": "POST - Extract text and generate technical questions",
+            "/detailedQuestionGeneration": "POST - Extract text and generate detailed questions based on experience and area of interest",
             "/health": "GET - Health check",
             "/docs": "GET - API documentation"
         }
