@@ -36,7 +36,7 @@ class TextExtractionResponse(BaseModel):
 class Question(BaseModel):
     question: str
     options: List[str]
-    correct_option: str
+    correct_option: str  # Will be "A", "B", "C", or "D"
 
 class QuestionGenerationResponse(BaseModel):
     success: bool
@@ -99,7 +99,7 @@ def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
     - Create questions about specific technologies, their features, best practices, and technical concepts
     - Include questions about experience levels with mentioned technologies
     - Each question should have exactly 4 options
-    - Only one option should be correct
+    - The correct_option should be specified as "A", "B", "C", or "D" (corresponding to the position in the options array)
     - Make questions challenging but fair for someone with the experience level shown in the resume
     - Focus on practical technical knowledge and implementation details
     - If the resume mentions specific projects, create questions about the technical aspects of those projects
@@ -115,14 +115,20 @@ def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
         {{
             "question": "Which programming language mentioned in the resume is object-oriented?",
             "options": ["Python", "HTML", "CSS", "SQL"],
-            "correct_option": "Python"
+            "correct_option": "A"
         }},
         {{
             "question": "What JavaScript framework is mentioned in the candidate's project experience?",
-            "options": ["React", "Angular", "Vue.js", "Svelte"],
-            "correct_option": "React"
+            "options": ["Angular", "React", "Vue.js", "Svelte"],
+            "correct_option": "B"
         }}
     ]
+
+    IMPORTANT: The correct_option must be "A", "B", "C", or "D" where:
+    - "A" corresponds to options[0]
+    - "B" corresponds to options[1]
+    - "C" corresponds to options[2]
+    - "D" corresponds to options[3]
 
     Generate exactly 25 technical questions based on the resume content.
     """
@@ -147,13 +153,20 @@ def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
         if not isinstance(questions, list) or len(questions) != 25:
             raise ValueError("Response must be a list of exactly 25 questions")
         
+        valid_options = {'A', 'B', 'C', 'D'}
+        
         for i, q in enumerate(questions):
             if not all(key in q for key in ['question', 'options', 'correct_option']):
                 raise ValueError(f"Question {i+1} is missing required fields")
             if len(q['options']) != 4:
                 raise ValueError(f"Question {i+1} must have exactly 4 options")
-            if q['correct_option'] not in q['options']:
-                raise ValueError(f"Question {i+1} correct_option must be one of the options")
+            if q['correct_option'] not in valid_options:
+                raise ValueError(f"Question {i+1} correct_option must be A, B, C, or D")
+            
+            # Additional validation: ensure the correct_option corresponds to a valid index
+            option_index = ord(q['correct_option']) - ord('A')  # Convert A->0, B->1, C->2, D->3
+            if option_index < 0 or option_index >= len(q['options']):
+                raise ValueError(f"Question {i+1} correct_option index is out of range")
         
         return questions
         
