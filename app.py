@@ -8,6 +8,7 @@ import google.generativeai as genai
 from io import BytesIO
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import math
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,6 +38,7 @@ class Question(BaseModel):
     question: str
     options: List[str]
     correct_option: str  # Will be "A", "B", "C", or "D"
+    difficulty: str  # Will be "easy", "medium", or "hard"
 
 class QuestionGenerationResponse(BaseModel):
     success: bool
@@ -44,6 +46,7 @@ class QuestionGenerationResponse(BaseModel):
     questions: List[Question]
     total_questions: int
     text_stats: Dict[str, int]
+    difficulty_breakdown: Dict[str, int]
 
 class HealthResponse(BaseModel):
     status: str
@@ -70,6 +73,18 @@ class EvaluationRequest(BaseModel):
 class EvaluationSummaryResponse(BaseModel):
     success: bool
     summary: str
+
+def calculate_difficulty_distribution(total_questions: int) -> Dict[str, int]:
+    """Calculate the distribution of questions by difficulty level."""
+    easy_count = math.ceil(total_questions * 0.2)  # 20% easy
+    hard_count = math.ceil(total_questions * 0.2)  # 20% hard
+    medium_count = total_questions - easy_count - hard_count  # Remaining 60% medium
+    
+    return {
+        "easy": easy_count,
+        "medium": medium_count,
+        "hard": hard_count
+    }
 
 def validate_file(file: UploadFile) -> None:
     """Validate uploaded file."""
@@ -104,11 +119,18 @@ async def extract_text_from_pdf(file: UploadFile) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error extracting text from PDF: {str(e)}")
 
-def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
+def generate_questions_with_gemini(resume_text: str, num_questions: int = 20) -> List[Dict[str, Any]]:
     """Generate multiple-choice questions using Gemini 2.0 Flash."""
     
+    difficulty_dist = calculate_difficulty_distribution(num_questions)
+    
     prompt = f"""
-    Based on the following resume, generate exactly 25 multiple-choice questions focused on the technical skills, technologies, frameworks, tools, and programming concepts mentioned in the resume.
+    Based on the following resume, generate exactly {num_questions} multiple-choice questions focused on the technical skills, technologies, frameworks, tools, and programming concepts mentioned in the resume.
+
+    DIFFICULTY DISTRIBUTION REQUIREMENTS:
+    - {difficulty_dist['easy']} EASY questions (fundamental concepts, basic syntax, definitions)
+    - {difficulty_dist['medium']} MEDIUM questions (practical application, best practices, common scenarios)
+    - {difficulty_dist['hard']} HARD questions (advanced concepts, optimization, complex scenarios, edge cases)
 
     RESUME CONTENT:
     {resume_text}
@@ -119,37 +141,65 @@ def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
     - Include questions about experience levels with mentioned technologies
     - Each question should have exactly 4 options
     - The correct_option should be specified as "A", "B", "C", or "D" (corresponding to the position in the options array)
+    - Each question must include a "difficulty" field with value "easy", "medium", or "hard"
     - Make questions challenging but fair for someone with the experience level shown in the resume
     - Focus on practical technical knowledge and implementation details
     - If the resume mentions specific projects, create questions about the technical aspects of those projects
 
-    EXAMPLE QUESTION TYPES:
-    - "Which Python framework mentioned in the resume is primarily used for web development?"
-    - "What is the main advantage of using Docker containers as mentioned in the candidate's experience?"
-    - "Based on the resume, which database technology was used in the e-commerce project?"
-    - "What testing framework does the candidate have experience with according to the resume?"
+    DIFFICULTY GUIDELINES:
+    - EASY: Basic definitions, syntax, fundamental concepts that any developer should know
+    - MEDIUM: Practical application, common use cases, best practices, standard implementation
+    - HARD: Advanced optimization, edge cases, complex scenarios, architectural decisions
+
+    EXAMPLE QUESTIONS BY DIFFICULTY:
+    
+    EASY EXAMPLE:
+    {{
+        "question": "Which of the following is a Python web framework mentioned in the resume?",
+        "options": ["Django", "Spring", "Laravel", "Ruby on Rails"],
+        "correct_option": "A",
+        "difficulty": "easy"
+    }}
+
+    MEDIUM EXAMPLE:
+    {{
+        "question": "What is the primary advantage of using Docker containers in the deployment process?",
+        "options": ["Faster compilation", "Environment consistency", "Code minification", "Database optimization"],
+        "correct_option": "B",
+        "difficulty": "medium"
+    }}
+
+    HARD EXAMPLE:
+    {{
+        "question": "In a microservices architecture with high traffic, which caching strategy would be most effective for session management?",
+        "options": ["Browser localStorage", "Database-level caching", "Distributed Redis cache", "File system cache"],
+        "correct_option": "C",
+        "difficulty": "hard"
+    }}
 
     REQUIRED OUTPUT FORMAT (respond with ONLY valid JSON, no additional text):
     [
         {{
             "question": "Which programming language mentioned in the resume is object-oriented?",
             "options": ["Python", "HTML", "CSS", "SQL"],
-            "correct_option": "A"
+            "correct_option": "A",
+            "difficulty": "easy"
         }},
         {{
             "question": "What JavaScript framework is mentioned in the candidate's project experience?",
             "options": ["Angular", "React", "Vue.js", "Svelte"],
-            "correct_option": "B"
+            "correct_option": "B",
+            "difficulty": "medium"
         }}
     ]
 
-    IMPORTANT: The correct_option must be "A", "B", "C", or "D" where:
-    - "A" corresponds to options[0]
-    - "B" corresponds to options[1]
-    - "C" corresponds to options[2]
-    - "D" corresponds to options[3]
+    IMPORTANT: 
+    - The correct_option must be "A", "B", "C", or "D" where A=options[0], B=options[1], C=options[2], D=options[3]
+    - Each question must have a "difficulty" field with exactly one of: "easy", "medium", "hard"
+    - Generate exactly {difficulty_dist['easy']} easy, {difficulty_dist['medium']} medium, and {difficulty_dist['hard']} hard questions
+    - Total questions must be exactly {num_questions}
 
-    Generate exactly 25 technical questions based on the resume content.
+    Generate exactly {num_questions} technical questions based on the resume content with the specified difficulty distribution.
     """
     
     try:
@@ -169,18 +219,21 @@ def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
         questions = json.loads(response_text)
         
         # Validate the structure
-        if not isinstance(questions, list) or len(questions) != 25:
-            raise ValueError("Response must be a list of exactly 25 questions")
+        if not isinstance(questions, list) or len(questions) != num_questions:
+            raise ValueError(f"Response must be a list of exactly {num_questions} questions")
         
         valid_options = {'A', 'B', 'C', 'D'}
+        valid_difficulties = {'easy', 'medium', 'hard'}
         
         for i, q in enumerate(questions):
-            if not all(key in q for key in ['question', 'options', 'correct_option']):
+            if not all(key in q for key in ['question', 'options', 'correct_option', 'difficulty']):
                 raise ValueError(f"Question {i+1} is missing required fields")
             if len(q['options']) != 4:
                 raise ValueError(f"Question {i+1} must have exactly 4 options")
             if q['correct_option'] not in valid_options:
                 raise ValueError(f"Question {i+1} correct_option must be A, B, C, or D")
+            if q['difficulty'] not in valid_difficulties:
+                raise ValueError(f"Question {i+1} difficulty must be easy, medium, or hard")
             
             # Additional validation: ensure the correct_option corresponds to a valid index
             option_index = ord(q['correct_option']) - ord('A')  # Convert A->0, B->1, C->2, D->3
@@ -194,8 +247,10 @@ def generate_questions_with_gemini(resume_text: str) -> List[Dict[str, Any]]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating questions with Gemini: {str(e)}")
 
-def generate_detailed_questions_with_gemini(resume_text: str, years_of_experience: int, area_of_interest: str) -> List[Dict[str, Any]]:
+def generate_detailed_questions_with_gemini(resume_text: str, years_of_experience: int, area_of_interest: str, num_questions: int = 20) -> List[Dict[str, Any]]:
     """Generate detailed multiple-choice questions using Gemini 2.0 Flash based on experience and area of interest."""
+    
+    difficulty_dist = calculate_difficulty_distribution(num_questions)
     
     # Define experience level based on years
     if years_of_experience <= 2:
@@ -212,7 +267,12 @@ def generate_detailed_questions_with_gemini(resume_text: str, years_of_experienc
         complexity = "expert-level concepts, system design, and leadership aspects"
     
     prompt = f"""
-    Based on the following resume and the specified professional profile, generate exactly 25 multiple-choice questions tailored for a {experience_level} professional with {years_of_experience} years of experience in {area_of_interest}.
+    Based on the following resume and the specified professional profile, generate exactly {num_questions} multiple-choice questions tailored for a {experience_level} professional with {years_of_experience} years of experience in {area_of_interest}.
+
+    DIFFICULTY DISTRIBUTION REQUIREMENTS:
+    - {difficulty_dist['easy']} EASY questions (fundamental concepts, basic definitions)
+    - {difficulty_dist['medium']} MEDIUM questions (practical application, best practices)
+    - {difficulty_dist['hard']} HARD questions (advanced concepts, optimization, complex scenarios)
 
     PROFESSIONAL PROFILE:
     - Years of Experience: {years_of_experience}
@@ -229,8 +289,14 @@ def generate_detailed_questions_with_gemini(resume_text: str, years_of_experienc
     - Consider the candidate's {years_of_experience} years of experience when crafting questions
     - Each question should have exactly 4 options
     - The correct_option should be specified as "A", "B", "C", or "D"
+    - Each question must include a "difficulty" field with value "easy", "medium", or "hard"
     - Make questions practical and relevant to real-world {area_of_interest} scenarios
     - Include questions about scalability, performance, security, and best practices relevant to {area_of_interest}
+
+    DIFFICULTY GUIDELINES FOR {experience_level} LEVEL:
+    - EASY: Fundamental {area_of_interest} concepts, basic tools, standard definitions
+    - MEDIUM: Common {area_of_interest} practices, implementation scenarios, troubleshooting
+    - HARD: Advanced {area_of_interest} optimization, complex architecture, edge cases
 
     QUESTION FOCUS AREAS for {area_of_interest}:
     - Technical skills and frameworks mentioned in the resume relevant to {area_of_interest}
@@ -246,17 +312,19 @@ def generate_detailed_questions_with_gemini(resume_text: str, years_of_experienc
         {{
             "question": "In a {area_of_interest} project with {years_of_experience} years of experience, which approach would be most suitable for...",
             "options": ["Option A", "Option B", "Option C", "Option D"],
-            "correct_option": "A"
+            "correct_option": "A",
+            "difficulty": "medium"
         }}
     ]
 
-    IMPORTANT: The correct_option must be "A", "B", "C", or "D" where:
-    - "A" corresponds to options[0]
-    - "B" corresponds to options[1]
-    - "C" corresponds to options[2]
-    - "D" corresponds to options[3]
+    IMPORTANT: 
+    - The correct_option must be "A", "B", "C", or "D" where A=options[0], B=options[1], C=options[2], D=options[3]
+    - Please donot annotate the options with any additional text or explanations[no 'A) Option A' format]
+    - Each question must have a "difficulty" field with exactly one of: "easy", "medium", "hard"
+    - Generate exactly {difficulty_dist['easy']} easy, {difficulty_dist['medium']} medium, and {difficulty_dist['hard']} hard questions
+    - Total questions must be exactly {num_questions}
 
-    Generate exactly 25 technical questions based on the resume content, experience level, and area of interest.
+    Generate exactly {num_questions} technical questions based on the resume content, experience level, and area of interest with the specified difficulty distribution.
     """
     
     try:
@@ -275,18 +343,21 @@ def generate_detailed_questions_with_gemini(resume_text: str, years_of_experienc
         questions = json.loads(response_text)
         
         # Validate the structure
-        if not isinstance(questions, list) or len(questions) != 25:
-            raise ValueError("Response must be a list of exactly 25 questions")
+        if not isinstance(questions, list) or len(questions) != num_questions:
+            raise ValueError(f"Response must be a list of exactly {num_questions} questions")
         
         valid_options = {'A', 'B', 'C', 'D'}
+        valid_difficulties = {'easy', 'medium', 'hard'}
         
         for i, q in enumerate(questions):
-            if not all(key in q for key in ['question', 'options', 'correct_option']):
+            if not all(key in q for key in ['question', 'options', 'correct_option', 'difficulty']):
                 raise ValueError(f"Question {i+1} is missing required fields")
             if len(q['options']) != 4:
                 raise ValueError(f"Question {i+1} must have exactly 4 options")
             if q['correct_option'] not in valid_options:
                 raise ValueError(f"Question {i+1} correct_option must be A, B, C, or D")
+            if q['difficulty'] not in valid_difficulties:
+                raise ValueError(f"Question {i+1} difficulty must be easy, medium, or hard")
             
             option_index = ord(q['correct_option']) - ord('A')
             if option_index < 0 or option_index >= len(q['options']):
@@ -360,20 +431,38 @@ async def extract_text(file: UploadFile = File(...)):
     )
 
 @app.post("/generatequestions", response_model=QuestionGenerationResponse)
-async def generate_questions(file: UploadFile = File(...)):
+async def generate_questions(
+    file: UploadFile = File(...),
+    noOfQuestions: str = Form("20")
+):
     """Extract text from PDF and generate technical multiple-choice questions."""
     
     # Validate file
     validate_file(file)
     
+    # Validate and convert noOfQuestions
+    try:
+        num_questions = int(noOfQuestions)
+        if num_questions < 5 or num_questions > 100:
+            raise ValueError("Number of questions must be between 5 and 100")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="noOfQuestions must be a valid number between 5 and 100")
+    
     # Extract text from PDF
     resume_text = await extract_text_from_pdf(file)
     
     # Generate questions using Gemini
-    questions_data = generate_questions_with_gemini(resume_text)
+    questions_data = generate_questions_with_gemini(resume_text, num_questions)
     
     # Convert to Pydantic models
     questions = [Question(**q) for q in questions_data]
+    
+    # Calculate actual difficulty breakdown
+    difficulty_breakdown = {
+        "easy": sum(1 for q in questions if q.difficulty == "easy"),
+        "medium": sum(1 for q in questions if q.difficulty == "medium"),
+        "hard": sum(1 for q in questions if q.difficulty == "hard")
+    }
     
     return QuestionGenerationResponse(
         success=True,
@@ -383,14 +472,16 @@ async def generate_questions(file: UploadFile = File(...)):
         text_stats={
             "character_count": len(resume_text),
             "word_count": len(resume_text.split())
-        }
+        },
+        difficulty_breakdown=difficulty_breakdown
     )
 
 @app.post("/detailedQuestionGeneration", response_model=QuestionGenerationResponse)
 async def detailed_question_generation(
     file: UploadFile = File(...),
     years_of_experience: str = Form(...),
-    area_of_interest: str = Form(...)
+    area_of_interest: str = Form(...),
+    noOfQuestions: str = Form("20")
 ):
     """Extract text from PDF and generate detailed technical multiple-choice questions based on experience and area of interest."""
     
@@ -409,14 +500,29 @@ async def detailed_question_generation(
     if not area_of_interest.strip():
         raise HTTPException(status_code=400, detail="Area of interest cannot be empty")
     
+    # Validate and convert noOfQuestions
+    try:
+        num_questions = int(noOfQuestions)
+        if num_questions < 5 or num_questions > 100:
+            raise ValueError("Number of questions must be between 5 and 100")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="noOfQuestions must be a valid number between 5 and 100")
+    
     # Extract text from PDF
     resume_text = await extract_text_from_pdf(file)
     
     # Generate detailed questions using Gemini
-    questions_data = generate_detailed_questions_with_gemini(resume_text, years_exp, area_of_interest.strip())
+    questions_data = generate_detailed_questions_with_gemini(resume_text, years_exp, area_of_interest.strip(), num_questions)
     
     # Convert to Pydantic models
     questions = [Question(**q) for q in questions_data]
+    
+    # Calculate actual difficulty breakdown
+    difficulty_breakdown = {
+        "easy": sum(1 for q in questions if q.difficulty == "easy"),
+        "medium": sum(1 for q in questions if q.difficulty == "medium"),
+        "hard": sum(1 for q in questions if q.difficulty == "hard")
+    }
     
     return QuestionGenerationResponse(
         success=True,
@@ -426,7 +532,8 @@ async def detailed_question_generation(
         text_stats={
             "character_count": len(resume_text),
             "word_count": len(resume_text.split())
-        }
+        },
+        difficulty_breakdown=difficulty_breakdown
     )
 
 @app.post("/evaluateCandidate", response_model=EvaluationSummaryResponse)
@@ -482,11 +589,15 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "/extracttext": "POST - Extract text from PDF",
-            "/generatequestions": "POST - Extract text and generate technical questions",
-            "/detailedQuestionGeneration": "POST - Extract text and generate detailed questions based on experience and area of interest",
+            "/generatequestions": "POST - Extract text and generate technical questions (accepts noOfQuestions parameter, default: 20)",
+            "/detailedQuestionGeneration": "POST - Extract text and generate detailed questions based on experience and area of interest (accepts noOfQuestions parameter, default: 20)",
             "/health": "GET - Health check",
             "/docs": "GET - API documentation",
             "/evaluateCandidate": "POST - Evaluate candidate and provide job recommendations summary",
+        },
+        "features": {
+            "dynamic_question_count": "Specify number of questions (5-100) using noOfQuestions parameter",
+            "difficulty_distribution": "20% easy, 60% medium, 20% hard questions"
         }
     }
 
